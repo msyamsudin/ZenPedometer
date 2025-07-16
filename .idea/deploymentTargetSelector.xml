@@ -15,7 +15,7 @@
       </SelectionState>
       <SelectionState runConfigName="Zen_Pedometer">
         <option name="selectionMode" value="DROPDOWN" />
-        <DropdownSelection timestamp="2025-07-15T17:06:23.274886400Z">
+        <DropdownSelection timestamp="2025-07-16T09:31:47.805135700Z">
           <Target type="DEFAULT_BOOT">
             <handle>
               <DeviceId pluginId="LocalEmulator" identifier="path=C:\Users\syams\.android\avd\Medium_Phone.avd" />

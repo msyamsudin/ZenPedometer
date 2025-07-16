@@ -11,6 +11,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -73,20 +74,22 @@ import java.util.concurrent.TimeUnit
 class MainActivity : ComponentActivity() {
     private lateinit var sharedPreferences: SharedPreferences
     private var stepCount = mutableStateOf(0f)
-    private var initialStepCount = -1f
+    private var initialStepCount = mutableStateOf(-1f)
     private var stepGoal = mutableStateOf(10000) // Default goal: 10,000 steps
     private var weight = mutableStateOf(70f) // Default weight: 70 kg
     private var height = mutableStateOf(170f) // Default height: 170 cm
     private var lastResetTime = mutableStateOf(0L)
     private var totalWalkingTime = mutableStateOf(0L)
-    private var isWalking = mutableStateOf(false)
     private var isDarkTheme = mutableStateOf(false) // Theme toggle state
+    private var isSensorAvailable = mutableStateOf(true)
 
     private val requestPermissionsLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
         if (permissions[Manifest.permission.ACTIVITY_RECOGNITION] == true) {
-            startStepTrackingService()
+            checkSensorAvailability {
+                startStepTrackingService()
+            }
         } else {
             stepCount.value = -1f
             Toast.makeText(this, "Activity recognition permission denied", Toast.LENGTH_LONG).show()
@@ -112,32 +115,54 @@ class MainActivity : ComponentActivity() {
         val numberFormat = NumberFormat.getNumberInstance(Locale("id", "ID")) // Indonesian locale for 10.000 format
 
         // Load saved data
-        initialStepCount = sharedPreferences.getFloat("initialStepCount", -1f)
-        stepGoal.value = sharedPreferences.getInt("stepGoal", 10000)
-        weight.value = sharedPreferences.getFloat("weight", 70f)
-        height.value = sharedPreferences.getFloat("height", 170f)
-        lastResetTime.value = sharedPreferences.getLong("lastResetTime", 0L)
-        totalWalkingTime.value = sharedPreferences.getLong("totalWalkingTime", 0L)
-        isDarkTheme.value = sharedPreferences.getBoolean("isDarkTheme", false)
+        try {
+            initialStepCount.value = sharedPreferences.getFloat("initialStepCount", -1f)
+            stepCount.value = sharedPreferences.getFloat("currentStepCount", 0f)
+            stepGoal.value = sharedPreferences.getInt("stepGoal", 10000)
+            weight.value = sharedPreferences.getFloat("weight", 70f)
+            height.value = sharedPreferences.getFloat("height", 170f)
+            lastResetTime.value = sharedPreferences.getLong("lastResetTime", 0L)
+            totalWalkingTime.value = sharedPreferences.getLong("totalWalkingTime", 0L)
+            isDarkTheme.value = sharedPreferences.getBoolean("isDarkTheme", false)
+            isSensorAvailable.value = sharedPreferences.getBoolean("isSensorAvailable", true)
+        } catch (e: Exception) {
+            Log.e("MainActivity", "Error loading SharedPreferences: ${e.message}")
+        }
 
-        // Check for daily reset
-        checkAndResetDailySteps()
+        // Check for daily and periodic resets
+        try {
+            checkAndResetSteps()
+        } catch (e: Exception) {
+            Log.e("MainActivity", "Error in checkAndResetSteps: ${e.message}")
+        }
+
+        // Register SharedPreferences listener to update step count
+        sharedPreferences.registerOnSharedPreferenceChangeListener { _, key ->
+            try {
+                when (key) {
+                    "currentStepCount" -> stepCount.value = sharedPreferences.getFloat("currentStepCount", 0f)
+                    "initialStepCount" -> initialStepCount.value = sharedPreferences.getFloat("initialStepCount", -1f)
+                    "totalWalkingTime" -> totalWalkingTime.value = sharedPreferences.getLong("totalWalkingTime", 0L)
+                    "isSensorAvailable" -> isSensorAvailable.value = sharedPreferences.getBoolean("isSensorAvailable", true)
+                }
+            } catch (e: Exception) {
+                Log.e("MainActivity", "Error in SharedPreferences listener: ${e.message}")
+            }
+        }
 
         // Request permissions
         requestPermissions()
         requestBatteryOptimization()
 
-        // Start foreground service
-        startStepTrackingService()
-
         setContent {
             ZenPedometerTheme(darkTheme = isDarkTheme.value) {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     PedometerScreen(
-                        stepCount = if (stepCount.value == -1f) -1 else (stepCount.value - initialStepCount).toInt(),
+                        stepCount = if (stepCount.value == -1f) -1 else (stepCount.value - initialStepCount.value).toInt(),
                         stepGoal = stepGoal.value,
                         weight = weight.value,
                         height = height.value,
+                        isSensorAvailable = isSensorAvailable.value,
                         onStepGoalChange = { newGoal ->
                             if (newGoal in 1000..50000) {
                                 stepGoal.value = newGoal
@@ -177,8 +202,13 @@ class MainActivity : ComponentActivity() {
                             Toast.makeText(this, "Theme switched to ${if (isDark) "Dark" else "Light"}", Toast.LENGTH_SHORT).show()
                         },
                         onResetSteps = {
-                            resetSteps()
-                            Toast.makeText(this, "Steps reset successfully", Toast.LENGTH_SHORT).show()
+                            try {
+                                resetSteps()
+                                Toast.makeText(this, "Steps reset successfully", Toast.LENGTH_SHORT).show()
+                            } catch (e: Exception) {
+                                Log.e("MainActivity", "Error resetting steps: ${e.message}")
+                                Toast.makeText(this, "Failed to reset steps", Toast.LENGTH_SHORT).show()
+                            }
                         },
                         numberFormat = numberFormat,
                         modifier = Modifier.padding(innerPadding)
@@ -188,79 +218,151 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun checkSensorAvailability(onSensorAvailable: () -> Unit) {
+        try {
+            val sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+            val stepSensor = sensorManager.getDefaultSensor(Sensor.TYPE_STEP_COUNTER)
+            isSensorAvailable.value = stepSensor != null
+            sharedPreferences.edit { putBoolean("isSensorAvailable", isSensorAvailable.value) }
+            if (!isSensorAvailable.value) {
+                Toast.makeText(this, "Step counter sensor not available on this device", Toast.LENGTH_LONG).show()
+                Log.w("MainActivity", "Step counter sensor not available")
+            } else {
+                onSensorAvailable()
+            }
+        } catch (e: Exception) {
+            Log.e("MainActivity", "Error checking sensor availability: ${e.message}")
+            isSensorAvailable.value = false
+            sharedPreferences.edit { putBoolean("isSensorAvailable", false) }
+            Toast.makeText(this, "Error checking sensor availability", Toast.LENGTH_LONG).show()
+        }
+    }
+
     private fun requestPermissions() {
         val permissions = mutableListOf(Manifest.permission.ACTIVITY_RECOGNITION)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             permissions.add(Manifest.permission.POST_NOTIFICATIONS)
         }
-        requestPermissionsLauncher.launch(permissions.toTypedArray())
+        try {
+            requestPermissionsLauncher.launch(permissions.toTypedArray())
+        } catch (e: Exception) {
+            Log.e("MainActivity", "Error requesting permissions: ${e.message}")
+            Toast.makeText(this, "Failed to request permissions", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun requestBatteryOptimization() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !isIgnoringBatteryOptimizations()) {
-            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
-            intent.data = Uri.parse("package:$packageName")
-            batteryOptimizationLauncher.launch(intent)
+            try {
+                val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                intent.data = Uri.parse("package:$packageName")
+                batteryOptimizationLauncher.launch(intent)
+            } catch (e: Exception) {
+                Log.e("MainActivity", "Error requesting battery optimization: ${e.message}")
+                Toast.makeText(this, "Failed to request battery optimization", Toast.LENGTH_SHORT).show()
+            }
         }
     }
 
     private fun isIgnoringBatteryOptimizations(): Boolean {
-        val powerManager = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
-        return powerManager.isIgnoringBatteryOptimizations(packageName)
-    }
-
-    private fun startStepTrackingService() {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACTIVITY_RECOGNITION) == PackageManager.PERMISSION_GRANTED) {
-            val intent = Intent(this, StepTrackingService::class.java)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(intent)
-            } else {
-                startService(intent)
-            }
+        return try {
+            val powerManager = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+            powerManager.isIgnoringBatteryOptimizations(packageName)
+        } catch (e: Exception) {
+            Log.e("MainActivity", "Error checking battery optimization: ${e.message}")
+            false
         }
     }
 
-    private fun checkAndResetDailySteps() {
+    private fun startStepTrackingService() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACTIVITY_RECOGNITION) == PackageManager.PERMISSION_GRANTED && isSensorAvailable.value) {
+            try {
+                val intent = Intent(this, StepTrackingService::class.java)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(intent)
+                } else {
+                    startService(intent)
+                }
+                Log.d("MainActivity", "StepTrackingService started successfully")
+            } catch (e: Exception) {
+                Log.e("MainActivity", "Error starting StepTrackingService: ${e.message}")
+                Toast.makeText(this, "Failed to start step tracking service", Toast.LENGTH_SHORT).show()
+            }
+        } else {
+            Log.w("MainActivity", "Not starting StepTrackingService: Permission denied or sensor unavailable")
+        }
+    }
+
+    private fun checkAndResetSteps() {
         val calendar = Calendar.getInstance()
         val currentDay = SimpleDateFormat("yyyyMMdd", Locale.US).format(calendar.time)
+        val currentWeek = SimpleDateFormat("yyyyww", Locale.US).format(calendar.time)
+        val currentMonth = SimpleDateFormat("yyyyMM", Locale.US).format(calendar.time)
+        val currentYear = SimpleDateFormat("yyyy", Locale.US).format(calendar.time)
         val lastResetDay = SimpleDateFormat("yyyyMMdd", Locale.US).format(lastResetTime.value)
+        val lastResetWeek = sharedPreferences.getString("lastResetWeek", "") ?: ""
+        val lastResetMonth = sharedPreferences.getString("lastResetMonth", "") ?: ""
+        val lastResetYear = sharedPreferences.getString("lastResetYear", "") ?: ""
 
-        if (lastResetDay != currentDay) {
-            initialStepCount = stepCount.value
-            totalWalkingTime.value = 0L
-            sharedPreferences.edit {
-                putFloat("initialStepCount", initialStepCount)
-                putLong("lastResetTime", calendar.timeInMillis)
-                putLong("totalWalkingTime", 0L)
+        try {
+            if (lastResetDay != currentDay) {
+                initialStepCount.value = stepCount.value
+                totalWalkingTime.value = 0L
+                sharedPreferences.edit {
+                    putFloat("initialStepCount", initialStepCount.value)
+                    putLong("lastResetTime", calendar.timeInMillis)
+                    putLong("totalWalkingTime", 0L)
+                    putFloat("steps_daily_$currentDay", 0f)
+                }
             }
-            saveStepData(0f)
+
+            if (lastResetWeek != currentWeek) {
+                sharedPreferences.edit {
+                    putFloat("steps_weekly_$currentWeek", 0f)
+                    putString("lastResetWeek", currentWeek)
+                }
+            }
+
+            if (lastResetMonth != currentMonth) {
+                sharedPreferences.edit {
+                    putFloat("steps_monthly_$currentMonth", 0f)
+                    putString("lastResetMonth", currentMonth)
+                }
+            }
+
+            if (lastResetYear != currentYear) {
+                sharedPreferences.edit {
+                    putFloat("steps_yearly_$currentYear", 0f)
+                    putString("lastResetYear", currentYear)
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("MainActivity", "Error in checkAndResetSteps: ${e.message}")
         }
     }
 
     private fun resetSteps() {
-        initialStepCount = stepCount.value
-        totalWalkingTime.value = 0L
-        isWalking.value = false
-        sharedPreferences.edit {
-            putFloat("initialStepCount", initialStepCount)
-            putLong("lastResetTime", System.currentTimeMillis())
-            putLong("totalWalkingTime", 0L)
-        }
-        saveStepData(0f)
-    }
-
-    private fun saveStepData(steps: Float) {
-        val calendar = Calendar.getInstance()
-        val dateKey = SimpleDateFormat("yyyyMMdd", Locale.US).format(calendar.time)
-        val weekKey = SimpleDateFormat("yyyyww", Locale.US).format(calendar.time)
-        val monthKey = SimpleDateFormat("yyyyMM", Locale.US).format(calendar.time)
-        val yearKey = SimpleDateFormat("yyyy", Locale.US).format(calendar.time)
-
-        sharedPreferences.edit {
-            putFloat("steps_daily_$dateKey", steps)
-            putFloat("steps_weekly_$weekKey", sharedPreferences.getFloat("steps_weekly_$weekKey", 0f) + steps)
-            putFloat("steps_monthly_$monthKey", sharedPreferences.getFloat("steps_monthly_$monthKey", 0f) + steps)
-            putFloat("steps_yearly_$yearKey", sharedPreferences.getFloat("steps_yearly_$yearKey", 0f) + steps)
+        try {
+            initialStepCount.value = stepCount.value
+            totalWalkingTime.value = 0L
+            sharedPreferences.edit {
+                putFloat("initialStepCount", initialStepCount.value)
+                putLong("lastResetTime", System.currentTimeMillis())
+                putLong("totalWalkingTime", 0L)
+            }
+            if (isSensorAvailable.value) {
+                val intent = Intent(this, StepTrackingService::class.java).apply {
+                    putExtra("RESET_STEPS", true)
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(intent)
+                } else {
+                    startService(intent)
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("MainActivity", "Error resetting steps: ${e.message}")
+            Toast.makeText(this, "Failed to reset steps", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -273,7 +375,12 @@ class MainActivity : ComponentActivity() {
             "yearly" -> "steps_yearly_${SimpleDateFormat("yyyy", Locale.US).format(calendar.time)}"
             else -> ""
         }
-        return sharedPreferences.getFloat(key, 0f).toInt()
+        return try {
+            sharedPreferences.getFloat(key, 0f).toInt()
+        } catch (e: Exception) {
+            Log.e("MainActivity", "Error getting steps for $period: ${e.message}")
+            0
+        }
     }
 }
 
@@ -283,6 +390,7 @@ fun PedometerScreen(
     stepGoal: Int,
     weight: Float,
     height: Float,
+    isSensorAvailable: Boolean,
     onStepGoalChange: (Int) -> Unit,
     onWeightChange: (Float) -> Unit,
     onHeightChange: (Float) -> Unit,
@@ -306,74 +414,64 @@ fun PedometerScreen(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        if (stepCount == -1) {
-            Text(
-                text = "Permission denied. Please grant activity recognition permission.",
-                fontSize = 18.sp,
-                textAlign = TextAlign.Center,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp)
+        // Theme Toggle
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End
+        ) {
+            Text("Dark Mode", fontSize = 16.sp, color = MaterialTheme.colorScheme.onSurface)
+            Switch(
+                checked = isDarkTheme,
+                onCheckedChange = onThemeToggle
             )
-        } else {
-            // Theme Toggle
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End
-            ) {
-                Text("Dark Mode", fontSize = 16.sp, color = MaterialTheme.colorScheme.onSurface)
-                Switch(
-                    checked = isDarkTheme,
-                    onCheckedChange = onThemeToggle
-                )
-            }
+        }
 
-            // Tab Navigation with Icons
-            TabRow(selectedTabIndex = selectedTab) {
-                tabs.forEachIndexed { index, title ->
-                    Tab(
-                        text = { Text(title) },
-                        icon = {
-                            when (index) {
-                                0 -> Icon(Icons.Filled.Dashboard, contentDescription = "Dashboard")
-                                1 -> Icon(Icons.Filled.Settings, contentDescription = "Settings")
-                                else -> null
-                            }
-                        },
-                        selected = selectedTab == index,
-                        onClick = { selectedTab = index }
-                    )
-                }
+        // Tab Navigation with Icons
+        TabRow(selectedTabIndex = selectedTab) {
+            tabs.forEachIndexed { index, title ->
+                Tab(
+                    text = { Text(title) },
+                    icon = {
+                        when (index) {
+                            0 -> Icon(Icons.Filled.Dashboard, contentDescription = "Dashboard")
+                            1 -> Icon(Icons.Filled.Settings, contentDescription = "Settings")
+                            else -> null
+                        }
+                    },
+                    selected = selectedTab == index,
+                    onClick = { selectedTab = index }
+                )
             }
+        }
 
-            // Tab Content
-            AnimatedVisibility(visible = selectedTab == 0) {
-                DashboardTab(
-                    stepCount = stepCount,
-                    stepGoal = stepGoal,
-                    weight = weight,
-                    height = height,
-                    dailySteps = dailySteps,
-                    weeklySteps = weeklySteps,
-                    monthlySteps = monthlySteps,
-                    yearlySteps = yearlySteps,
-                    walkingDuration = walkingDuration,
-                    isDarkTheme = isDarkTheme,
-                    numberFormat = numberFormat
-                )
-            }
-            AnimatedVisibility(visible = selectedTab == 1) {
-                SettingsTab(
-                    stepGoal = stepGoal,
-                    weight = weight,
-                    height = height,
-                    onStepGoalChange = onStepGoalChange,
-                    onWeightChange = onWeightChange,
-                    onHeightChange = onHeightChange,
-                    onResetSteps = onResetSteps,
-                    numberFormat = numberFormat
-                )
-            }
+        // Tab Content
+        AnimatedVisibility(visible = selectedTab == 0) {
+            DashboardTab(
+                stepCount = stepCount,
+                stepGoal = stepGoal,
+                weight = weight,
+                height = height,
+                isSensorAvailable = isSensorAvailable,
+                dailySteps = dailySteps,
+                weeklySteps = weeklySteps,
+                monthlySteps = monthlySteps,
+                yearlySteps = yearlySteps,
+                walkingDuration = walkingDuration,
+                isDarkTheme = isDarkTheme,
+                numberFormat = numberFormat
+            )
+        }
+        AnimatedVisibility(visible = selectedTab == 1) {
+            SettingsTab(
+                stepGoal = stepGoal,
+                weight = weight,
+                height = height,
+                onStepGoalChange = onStepGoalChange,
+                onWeightChange = onWeightChange,
+                onHeightChange = onHeightChange,
+                onResetSteps = onResetSteps,
+                numberFormat = numberFormat
+            )
         }
     }
 }
@@ -384,6 +482,7 @@ fun DashboardTab(
     stepGoal: Int,
     weight: Float,
     height: Float,
+    isSensorAvailable: Boolean,
     dailySteps: Int,
     weeklySteps: Int,
     monthlySteps: Int,
@@ -394,9 +493,9 @@ fun DashboardTab(
     modifier: Modifier = Modifier
 ) {
     val stepLength = height * 0.415f / 100 // Convert cm to meters, then apply step length factor
-    val distanceKm = stepCount * stepLength / 1000
-    val calories = distanceKm * weight * 0.57f // MET factor for walking
-    val durationMinutes = TimeUnit.MILLISECONDS.toMinutes(walkingDuration)
+    val distanceKm = if (isSensorAvailable) stepCount * stepLength / 1000 else 0f
+    val calories = if (isSensorAvailable) distanceKm * weight * 0.57f else 0f // MET factor for walking
+    val durationMinutes = if (isSensorAvailable) TimeUnit.MILLISECONDS.toMinutes(walkingDuration) else 0L
     val progressColor = if (isDarkTheme) Color(0xFF4CAF50) else Color(0xFF1976D2) // Green for dark, Blue for light
 
     Column(
@@ -406,6 +505,25 @@ fun DashboardTab(
         verticalArrangement = Arrangement.spacedBy(16.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
+        if (!isSensorAvailable) {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.errorContainer, shape = RoundedCornerShape(16.dp)),
+                elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+            ) {
+                Text(
+                    text = "Step counter sensor not available on this device.",
+                    fontSize = 18.sp,
+                    color = MaterialTheme.colorScheme.error,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp)
+                )
+            }
+        }
+
         Card(
             modifier = Modifier
                 .fillMaxWidth()
@@ -417,13 +535,17 @@ fun DashboardTab(
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Text(
-                    text = "Steps: ${numberFormat.format(stepCount)} / ${numberFormat.format(stepGoal)}",
+                    text = if (isSensorAvailable) {
+                        "Steps: ${numberFormat.format(stepCount)} / ${numberFormat.format(stepGoal)}"
+                    } else {
+                        "Steps: N/A / ${numberFormat.format(stepGoal)}"
+                    },
                     fontSize = 28.sp,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onSurface
                 )
                 CircularProgressIndicator(
-                    progress = { minOf(stepCount.toFloat() / stepGoal, 1f) },
+                    progress = if (isSensorAvailable) minOf(stepCount.toFloat() / stepGoal, 1f) else 0f,
                     modifier = Modifier.size(140.dp),
                     strokeWidth = 14.dp,
                     color = progressColor,
@@ -431,7 +553,11 @@ fun DashboardTab(
                     strokeCap = StrokeCap.Round
                 )
                 Text(
-                    text = "Progress: ${String.format("%.1f", (stepCount.toFloat() / stepGoal * 100))}%",
+                    text = if (isSensorAvailable) {
+                        "Progress: ${String.format("%.1f", (stepCount.toFloat() / stepGoal * 100))}%"
+                    } else {
+                        "Progress: N/A"
+                    },
                     fontSize = 20.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -456,17 +582,29 @@ fun DashboardTab(
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = "Distance: ${String.format("%.2f", distanceKm)} km",
+                    text = if (isSensorAvailable) {
+                        "Distance: ${String.format("%.2f", distanceKm)} km"
+                    } else {
+                        "Distance: N/A"
+                    },
                     fontSize = 18.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Text(
-                    text = "Calories: ${String.format("%.2f", calories)} kcal",
+                    text = if (isSensorAvailable) {
+                        "Calories: ${String.format("%.2f", calories)} kcal"
+                    } else {
+                        "Calories: N/A"
+                    },
                     fontSize = 18.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Text(
-                    text = "Walking Time: ${numberFormat.format(durationMinutes)} min",
+                    text = if (isSensorAvailable) {
+                        "Walking Time: ${numberFormat.format(durationMinutes)} min"
+                    } else {
+                        "Walking Time: N/A"
+                    },
                     fontSize = 18.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -491,22 +629,38 @@ fun DashboardTab(
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = "Today: ${numberFormat.format(dailySteps)} steps",
+                    text = if (isSensorAvailable) {
+                        "Today: ${numberFormat.format(dailySteps)} steps"
+                    } else {
+                        "Today: N/A"
+                    },
                     fontSize = 18.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Text(
-                    text = "This Week: ${numberFormat.format(weeklySteps)} steps",
+                    text = if (isSensorAvailable) {
+                        "This Week: ${numberFormat.format(weeklySteps)} steps"
+                    } else {
+                        "This Week: N/A"
+                    },
                     fontSize = 18.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Text(
-                    text = "This Month: ${numberFormat.format(monthlySteps)} steps",
+                    text = if (isSensorAvailable) {
+                        "This Month: ${numberFormat.format(monthlySteps)} steps"
+                    } else {
+                        "This Month: N/A"
+                    },
                     fontSize = 18.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Text(
-                    text = "This Year: ${numberFormat.format(yearlySteps)} steps",
+                    text = if (isSensorAvailable) {
+                        "This Year: ${numberFormat.format(yearlySteps)} steps"
+                    } else {
+                        "This Year: N/A"
+                    },
                     fontSize = 18.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -628,6 +782,7 @@ fun PedometerScreenPreview() {
             stepGoal = 10000,
             weight = 70f,
             height = 170f,
+            isSensorAvailable = true,
             onStepGoalChange = {},
             onWeightChange = {},
             onHeightChange = {},
@@ -636,6 +791,33 @@ fun PedometerScreenPreview() {
             monthlySteps = 25000,
             yearlySteps = 300000,
             walkingDuration = 3600000L, // 1 hour
+            isDarkTheme = false,
+            onThemeToggle = {},
+            onResetSteps = {},
+            numberFormat = numberFormat
+        )
+    }
+}
+
+@Preview(showBackground = true)
+@Composable
+fun PedometerScreenNoSensorPreview() {
+    val numberFormat = NumberFormat.getNumberInstance(Locale("id", "ID"))
+    ZenPedometerTheme(darkTheme = false) {
+        PedometerScreen(
+            stepCount = -1,
+            stepGoal = 10000,
+            weight = 70f,
+            height = 170f,
+            isSensorAvailable = false,
+            onStepGoalChange = {},
+            onWeightChange = {},
+            onHeightChange = {},
+            dailySteps = 0,
+            weeklySteps = 0,
+            monthlySteps = 0,
+            yearlySteps = 0,
+            walkingDuration = 0L,
             isDarkTheme = false,
             onThemeToggle = {},
             onResetSteps = {},
