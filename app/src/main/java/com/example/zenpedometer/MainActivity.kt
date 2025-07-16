@@ -12,25 +12,31 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Dashboard
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
@@ -43,7 +49,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.foundation.text.KeyboardOptions // Impor yang ditambahkan
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -69,6 +77,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private var walkingStartTime = mutableStateOf(0L)
     private var totalWalkingTime = mutableStateOf(0L)
     private var isWalking = mutableStateOf(false)
+    private var isDarkTheme = mutableStateOf(false) // Theme toggle state
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -95,12 +104,13 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         height.value = sharedPreferences.getFloat("height", 170f)
         lastResetTime.value = sharedPreferences.getLong("lastResetTime", 0L)
         totalWalkingTime.value = sharedPreferences.getLong("totalWalkingTime", 0L)
+        isDarkTheme.value = sharedPreferences.getBoolean("isDarkTheme", false) // Load theme preference
 
         // Check for daily reset
         checkAndResetDailySteps()
 
         setContent {
-            ZenPedometerTheme {
+            ZenPedometerTheme(darkTheme = isDarkTheme.value) {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     PedometerScreen(
                         stepCount = if (stepCount.value == -1f) -1 else (stepCount.value - initialStepCount).toInt(),
@@ -130,6 +140,11 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                         monthlySteps = getStepsForPeriod("monthly"),
                         yearlySteps = getStepsForPeriod("yearly"),
                         walkingDuration = totalWalkingTime.value,
+                        isDarkTheme = isDarkTheme.value,
+                        onThemeToggle = { isDark ->
+                            isDarkTheme.value = isDark
+                            sharedPreferences.edit { putBoolean("isDarkTheme", isDark) }
+                        },
                         modifier = Modifier.padding(innerPadding)
                     )
                 }
@@ -248,6 +263,8 @@ fun PedometerScreen(
     monthlySteps: Int,
     yearlySteps: Int,
     walkingDuration: Long,
+    isDarkTheme: Boolean,
+    onThemeToggle: (Boolean) -> Unit,
     modifier: Modifier = Modifier
 ) {
     var selectedTab by remember { mutableIntStateOf(0) }
@@ -269,6 +286,18 @@ fun PedometerScreen(
                     .padding(16.dp)
             )
         } else {
+            // Theme Toggle
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End
+            ) {
+                Text("Dark Mode", fontSize = 16.sp, color = MaterialTheme.colorScheme.onSurface)
+                Switch(
+                    checked = isDarkTheme,
+                    onCheckedChange = onThemeToggle
+                )
+            }
+
             // Tab Navigation with Icons
             TabRow(selectedTabIndex = selectedTab) {
                 tabs.forEachIndexed { index, title ->
@@ -298,7 +327,8 @@ fun PedometerScreen(
                     weeklySteps = weeklySteps,
                     monthlySteps = monthlySteps,
                     yearlySteps = yearlySteps,
-                    walkingDuration = walkingDuration
+                    walkingDuration = walkingDuration,
+                    isDarkTheme = isDarkTheme
                 )
             }
             AnimatedVisibility(visible = selectedTab == 1) {
@@ -325,18 +355,28 @@ fun DashboardTab(
     weeklySteps: Int,
     monthlySteps: Int,
     yearlySteps: Int,
-    walkingDuration: Long
+    walkingDuration: Long,
+    isDarkTheme: Boolean,
+    modifier: Modifier = Modifier
 ) {
+    val stepLength = height * 0.415f / 100 // Convert cm to meters, then apply step length factor
+    val distanceKm = stepCount * stepLength / 1000
+    val calories = distanceKm * weight * 0.57f // MET factor for walking
+    val durationMinutes = TimeUnit.MILLISECONDS.toMinutes(walkingDuration)
+    val progressColor = if (isDarkTheme) Color(0xFF4CAF50) else Color(0xFF1976D2) // Green for dark, Blue for light
+
     Column(
-        modifier = Modifier.fillMaxSize(),
+        modifier = modifier
+            .fillMaxSize()
+            .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // Step Progress with CircularProgressIndicator
         Card(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(8.dp)
+                .background(MaterialTheme.colorScheme.surfaceVariant, shape = RoundedCornerShape(16.dp)),
+            elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
         ) {
             Column(
                 modifier = Modifier.padding(16.dp),
@@ -344,74 +384,99 @@ fun DashboardTab(
             ) {
                 Text(
                     text = "Steps: $stepCount / $stepGoal",
-                    fontSize = 24.sp,
-                    style = MaterialTheme.typography.headlineMedium
+                    fontSize = 28.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
                 )
+                // Modern Progress Indicator with Theme Adaptation
                 CircularProgressIndicator(
-                    progress = { stepCount.toFloat() / stepGoal },
-                    modifier = Modifier.size(100.dp),
-                    strokeWidth = 10.dp
+                    progress = { minOf(stepCount.toFloat() / stepGoal, 1f) },
+                    modifier = Modifier.size(140.dp),
+                    strokeWidth = 14.dp,
+                    color = progressColor,
+                    trackColor = MaterialTheme.colorScheme.surface,
+                    strokeCap = StrokeCap.Round
                 )
                 Text(
                     text = "Progress: ${String.format("%.1f", (stepCount.toFloat() / stepGoal * 100))}%",
-                    fontSize = 18.sp
+                    fontSize = 20.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }
 
-        // Metrics
         Card(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(8.dp)
+                .background(MaterialTheme.colorScheme.surfaceVariant, shape = RoundedCornerShape(16.dp)),
+            elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
         ) {
             Column(
                 modifier = Modifier.padding(16.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
+                horizontalAlignment = Alignment.Start
             ) {
-                // Distance
-                val stepLength = height * 0.415f / 100 // Height in cm to meters, then * 0.415
-                val distanceKm = stepCount * stepLength / 1000 // Convert to km
+                Text(
+                    text = "Metrics",
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Spacer(modifier = Modifier.height(8.dp))
                 Text(
                     text = "Distance: ${String.format("%.2f", distanceKm)} km",
-                    fontSize = 18.sp
+                    fontSize = 18.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-
-                // Calories
-                val calories = distanceKm * weight * 0.57f // 0.57 is MET factor for walking
                 Text(
                     text = "Calories: ${String.format("%.2f", calories)} kcal",
-                    fontSize = 18.sp
+                    fontSize = 18.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-
-                // Walking Duration
-                val durationMinutes = TimeUnit.MILLISECONDS.toMinutes(walkingDuration)
                 Text(
-                    text = "Walking Time: ${String.format("%d min", durationMinutes)}",
-                    fontSize = 18.sp
+                    text = "Walking Time: ${String.format("%d", durationMinutes)} min",
+                    fontSize = 18.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }
 
-        // Step History
         Card(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(8.dp)
+                .background(MaterialTheme.colorScheme.surfaceVariant, shape = RoundedCornerShape(16.dp)),
+            elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
         ) {
             Column(
                 modifier = Modifier.padding(16.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
+                horizontalAlignment = Alignment.Start
             ) {
                 Text(
                     text = "Step History",
-                    fontSize = 20.sp,
-                    style = MaterialTheme.typography.headlineSmall
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface
                 )
-                Text(text = "Today: $dailySteps steps", fontSize = 16.sp)
-                Text(text = "This Week: $weeklySteps steps", fontSize = 16.sp)
-                Text(text = "This Month: $monthlySteps steps", fontSize = 16.sp)
-                Text(text = "This Year: $yearlySteps steps", fontSize = 16.sp)
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "Today: $dailySteps steps",
+                    fontSize = 18.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = "This Week: $weeklySteps steps",
+                    fontSize = 18.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = "This Month: $monthlySteps steps",
+                    fontSize = 18.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = "This Year: $yearlySteps steps",
+                    fontSize = 18.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
     }
@@ -454,7 +519,7 @@ fun SettingsTab(
                 value = goalInput,
                 onValueChange = { goalInput = it },
                 label = { Text("Daily Step Goal (1000-50000)") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), // Baris 46
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 modifier = Modifier.weight(1f)
             )
             Button(
@@ -521,7 +586,7 @@ fun SettingsTab(
 @Preview(showBackground = true)
 @Composable
 fun PedometerScreenPreview() {
-    ZenPedometerTheme {
+    ZenPedometerTheme(darkTheme = false) {
         PedometerScreen(
             stepCount = 1234,
             stepGoal = 10000,
@@ -534,7 +599,9 @@ fun PedometerScreenPreview() {
             weeklySteps = 5678,
             monthlySteps = 25000,
             yearlySteps = 300000,
-            walkingDuration = 3600000L // 1 hour
+            walkingDuration = 3600000L, // 1 hour
+            isDarkTheme = false,
+            onThemeToggle = {}
         )
     }
 }
