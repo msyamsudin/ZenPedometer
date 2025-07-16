@@ -59,6 +59,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.core.content.edit
 import com.example.zenpedometer.ui.theme.ZenPedometerTheme
+import java.text.NumberFormat
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Locale
@@ -96,6 +97,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         stepSensor = sensorManager.getDefaultSensor(Sensor.TYPE_STEP_COUNTER)
         sharedPreferences = getSharedPreferences("ZenPedometerPrefs", Context.MODE_PRIVATE)
+        val numberFormat = NumberFormat.getNumberInstance(Locale("id", "ID")) // Indonesian locale for 10.000 format
 
         // Load saved data
         initialStepCount = sharedPreferences.getFloat("initialStepCount", -1f)
@@ -145,6 +147,10 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                             isDarkTheme.value = isDark
                             sharedPreferences.edit { putBoolean("isDarkTheme", isDark) }
                         },
+                        onResetSteps = {
+                            resetSteps()
+                        },
+                        numberFormat = numberFormat,
                         modifier = Modifier.padding(innerPadding)
                     )
                 }
@@ -221,6 +227,18 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         }
     }
 
+    private fun resetSteps() {
+        initialStepCount = stepCount.value
+        totalWalkingTime.value = 0L
+        isWalking.value = false
+        sharedPreferences.edit {
+            putFloat("initialStepCount", initialStepCount)
+            putLong("lastResetTime", System.currentTimeMillis())
+            putLong("totalWalkingTime", 0L)
+        }
+        saveStepData(0f)
+    }
+
     private fun saveStepData(steps: Float) {
         val calendar = Calendar.getInstance()
         val dateKey = SimpleDateFormat("yyyyMMdd", Locale.US).format(calendar.time)
@@ -265,6 +283,8 @@ fun PedometerScreen(
     walkingDuration: Long,
     isDarkTheme: Boolean,
     onThemeToggle: (Boolean) -> Unit,
+    onResetSteps: () -> Unit,
+    numberFormat: NumberFormat,
     modifier: Modifier = Modifier
 ) {
     var selectedTab by remember { mutableIntStateOf(0) }
@@ -328,7 +348,8 @@ fun PedometerScreen(
                     monthlySteps = monthlySteps,
                     yearlySteps = yearlySteps,
                     walkingDuration = walkingDuration,
-                    isDarkTheme = isDarkTheme
+                    isDarkTheme = isDarkTheme,
+                    numberFormat = numberFormat
                 )
             }
             AnimatedVisibility(visible = selectedTab == 1) {
@@ -338,7 +359,9 @@ fun PedometerScreen(
                     height = height,
                     onStepGoalChange = onStepGoalChange,
                     onWeightChange = onWeightChange,
-                    onHeightChange = onHeightChange
+                    onHeightChange = onHeightChange,
+                    onResetSteps = onResetSteps,
+                    numberFormat = numberFormat
                 )
             }
         }
@@ -357,6 +380,7 @@ fun DashboardTab(
     yearlySteps: Int,
     walkingDuration: Long,
     isDarkTheme: Boolean,
+    numberFormat: NumberFormat,
     modifier: Modifier = Modifier
 ) {
     val stepLength = height * 0.415f / 100 // Convert cm to meters, then apply step length factor
@@ -383,7 +407,7 @@ fun DashboardTab(
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Text(
-                    text = "Steps: $stepCount / $stepGoal",
+                    text = "Steps: ${numberFormat.format(stepCount)} / ${numberFormat.format(stepGoal)}",
                     fontSize = 28.sp,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onSurface
@@ -433,7 +457,7 @@ fun DashboardTab(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Text(
-                    text = "Walking Time: ${String.format("%d", durationMinutes)} min",
+                    text = "Walking Time: ${numberFormat.format(durationMinutes)} min",
                     fontSize = 18.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -458,22 +482,22 @@ fun DashboardTab(
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = "Today: $dailySteps steps",
+                    text = "Today: ${numberFormat.format(dailySteps)} steps",
                     fontSize = 18.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Text(
-                    text = "This Week: $weeklySteps steps",
+                    text = "This Week: ${numberFormat.format(weeklySteps)} steps",
                     fontSize = 18.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Text(
-                    text = "This Month: $monthlySteps steps",
+                    text = "This Month: ${numberFormat.format(monthlySteps)} steps",
                     fontSize = 18.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Text(
-                    text = "This Year: $yearlySteps steps",
+                    text = "This Year: ${numberFormat.format(yearlySteps)} steps",
                     fontSize = 18.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -489,9 +513,11 @@ fun SettingsTab(
     height: Float,
     onStepGoalChange: (Int) -> Unit,
     onWeightChange: (Float) -> Unit,
-    onHeightChange: (Float) -> Unit
+    onHeightChange: (Float) -> Unit,
+    onResetSteps: () -> Unit,
+    numberFormat: NumberFormat
 ) {
-    var goalInput by remember { mutableStateOf(stepGoal.toString()) }
+    var goalInput by remember { mutableStateOf(numberFormat.format(stepGoal)) }
     var weightValue by remember { mutableFloatStateOf(weight) }
     var heightValue by remember { mutableFloatStateOf(height) }
     var errorMessage by remember { mutableStateOf("") }
@@ -517,19 +543,22 @@ fun SettingsTab(
         ) {
             OutlinedTextField(
                 value = goalInput,
-                onValueChange = { goalInput = it },
-                label = { Text("Daily Step Goal (1000-50000)") },
+                onValueChange = { input ->
+                    goalInput = input.replace(".", "") // Remove dots for user input
+                },
+                label = { Text("Daily Step Goal (1.000-50.000)") },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 modifier = Modifier.weight(1f)
             )
             Button(
                 onClick = {
-                    val newGoal = goalInput.toIntOrNull()
+                    val newGoal = goalInput.replace(".", "").toIntOrNull()
                     if (newGoal != null && newGoal in 1000..50000) {
                         onStepGoalChange(newGoal)
                         errorMessage = ""
+                        goalInput = numberFormat.format(newGoal) // Update with formatted value
                     } else {
-                        errorMessage = "Step goal must be between 1000 and 50000"
+                        errorMessage = "Step goal must be between 1.000 and 50.000"
                     }
                 },
                 modifier = Modifier.padding(start = 8.dp)
@@ -572,6 +601,14 @@ fun SettingsTab(
             modifier = Modifier.fillMaxWidth()
         )
 
+        // Reset Steps Button
+        Button(
+            onClick = onResetSteps,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("Reset Steps")
+        }
+
         // Error Message
         if (errorMessage.isNotEmpty()) {
             Text(
@@ -586,6 +623,7 @@ fun SettingsTab(
 @Preview(showBackground = true)
 @Composable
 fun PedometerScreenPreview() {
+    val numberFormat = NumberFormat.getNumberInstance(Locale("id", "ID"))
     ZenPedometerTheme(darkTheme = false) {
         PedometerScreen(
             stepCount = 1234,
@@ -601,7 +639,9 @@ fun PedometerScreenPreview() {
             yearlySteps = 300000,
             walkingDuration = 3600000L, // 1 hour
             isDarkTheme = false,
-            onThemeToggle = {}
+            onThemeToggle = {},
+            onResetSteps = {},
+            numberFormat = numberFormat
         )
     }
 }
