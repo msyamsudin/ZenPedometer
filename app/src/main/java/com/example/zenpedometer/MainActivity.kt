@@ -1,13 +1,17 @@
 package com.example.zenpedometer
 
+import android.Manifest
 import android.content.Context
+import android.content.Intent
 import android.content.SharedPreferences
+import android.content.pm.PackageManager
 import android.hardware.Sensor
-import android.hardware.SensorEvent
-import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -57,6 +61,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.core.content.ContextCompat
 import androidx.core.content.edit
 import com.example.zenpedometer.ui.theme.ZenPedometerTheme
 import java.text.NumberFormat
@@ -65,37 +70,44 @@ import java.util.Calendar
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 
-class MainActivity : ComponentActivity(), SensorEventListener {
-    private lateinit var sensorManager: SensorManager
-    private var stepSensor: Sensor? = null
+class MainActivity : ComponentActivity() {
+    private lateinit var sharedPreferences: SharedPreferences
     private var stepCount = mutableStateOf(0f)
     private var initialStepCount = -1f
-    private lateinit var sharedPreferences: SharedPreferences
     private var stepGoal = mutableStateOf(10000) // Default goal: 10,000 steps
     private var weight = mutableStateOf(70f) // Default weight: 70 kg
     private var height = mutableStateOf(170f) // Default height: 170 cm
     private var lastResetTime = mutableStateOf(0L)
-    private var walkingStartTime = mutableStateOf(0L)
     private var totalWalkingTime = mutableStateOf(0L)
     private var isWalking = mutableStateOf(false)
     private var isDarkTheme = mutableStateOf(false) // Theme toggle state
 
-    private val requestPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { isGranted ->
-        if (isGranted) {
-            stepSensor?.also { sensor ->
-                sensorManager.registerListener(this, sensor, SensorManager.SENSOR_DELAY_UI)
-            }
+    private val requestPermissionsLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        if (permissions[Manifest.permission.ACTIVITY_RECOGNITION] == true) {
+            startStepTrackingService()
         } else {
             stepCount.value = -1f
+            Toast.makeText(this, "Activity recognition permission denied", Toast.LENGTH_LONG).show()
+        }
+        if (permissions[Manifest.permission.POST_NOTIFICATIONS] != true) {
+            Toast.makeText(this, "Notification permission denied", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private val batteryOptimizationLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { _ ->
+        if (isIgnoringBatteryOptimizations()) {
+            Toast.makeText(this, "Battery optimization disabled", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(this, "Please disable battery optimization for continuous tracking", Toast.LENGTH_LONG).show()
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
-        stepSensor = sensorManager.getDefaultSensor(Sensor.TYPE_STEP_COUNTER)
         sharedPreferences = getSharedPreferences("ZenPedometerPrefs", Context.MODE_PRIVATE)
         val numberFormat = NumberFormat.getNumberInstance(Locale("id", "ID")) // Indonesian locale for 10.000 format
 
@@ -106,10 +118,17 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         height.value = sharedPreferences.getFloat("height", 170f)
         lastResetTime.value = sharedPreferences.getLong("lastResetTime", 0L)
         totalWalkingTime.value = sharedPreferences.getLong("totalWalkingTime", 0L)
-        isDarkTheme.value = sharedPreferences.getBoolean("isDarkTheme", false) // Load theme preference
+        isDarkTheme.value = sharedPreferences.getBoolean("isDarkTheme", false)
 
         // Check for daily reset
         checkAndResetDailySteps()
+
+        // Request permissions
+        requestPermissions()
+        requestBatteryOptimization()
+
+        // Start foreground service
+        startStepTrackingService()
 
         setContent {
             ZenPedometerTheme(darkTheme = isDarkTheme.value) {
@@ -123,18 +142,27 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                             if (newGoal in 1000..50000) {
                                 stepGoal.value = newGoal
                                 sharedPreferences.edit { putInt("stepGoal", newGoal) }
+                                Toast.makeText(this, "Step goal updated to ${numberFormat.format(newGoal)}", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(this, "Step goal must be between 1.000 and 50.000", Toast.LENGTH_SHORT).show()
                             }
                         },
                         onWeightChange = { newWeight ->
                             if (newWeight in 30f..150f) {
                                 weight.value = newWeight
                                 sharedPreferences.edit { putFloat("weight", newWeight) }
+                                Toast.makeText(this, "Weight updated to ${newWeight.toInt()} kg", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(this, "Weight must be between 30 and 150 kg", Toast.LENGTH_SHORT).show()
                             }
                         },
                         onHeightChange = { newHeight ->
                             if (newHeight in 100f..250f) {
                                 height.value = newHeight
                                 sharedPreferences.edit { putFloat("height", newHeight) }
+                                Toast.makeText(this, "Height updated to ${newHeight.toInt()} cm", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(this, "Height must be between 100 and 250 cm", Toast.LENGTH_SHORT).show()
                             }
                         },
                         dailySteps = getStepsForPeriod("daily"),
@@ -146,9 +174,11 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                         onThemeToggle = { isDark ->
                             isDarkTheme.value = isDark
                             sharedPreferences.edit { putBoolean("isDarkTheme", isDark) }
+                            Toast.makeText(this, "Theme switched to ${if (isDark) "Dark" else "Light"}", Toast.LENGTH_SHORT).show()
                         },
                         onResetSteps = {
                             resetSteps()
+                            Toast.makeText(this, "Steps reset successfully", Toast.LENGTH_SHORT).show()
                         },
                         numberFormat = numberFormat,
                         modifier = Modifier.padding(innerPadding)
@@ -156,57 +186,38 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 }
             }
         }
+    }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            requestPermissionLauncher.launch(android.Manifest.permission.ACTIVITY_RECOGNITION)
-        } else {
-            stepSensor?.also { sensor ->
-                sensorManager.registerListener(this, sensor, SensorManager.SENSOR_DELAY_UI)
+    private fun requestPermissions() {
+        val permissions = mutableListOf(Manifest.permission.ACTIVITY_RECOGNITION)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            permissions.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        requestPermissionsLauncher.launch(permissions.toTypedArray())
+    }
+
+    private fun requestBatteryOptimization() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !isIgnoringBatteryOptimizations()) {
+            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+            intent.data = Uri.parse("package:$packageName")
+            batteryOptimizationLauncher.launch(intent)
+        }
+    }
+
+    private fun isIgnoringBatteryOptimizations(): Boolean {
+        val powerManager = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+        return powerManager.isIgnoringBatteryOptimizations(packageName)
+    }
+
+    private fun startStepTrackingService() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACTIVITY_RECOGNITION) == PackageManager.PERMISSION_GRANTED) {
+            val intent = Intent(this, StepTrackingService::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(intent)
+            } else {
+                startService(intent)
             }
         }
-    }
-
-    override fun onResume() {
-        super.onResume()
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || stepCount.value != -1f) {
-            stepSensor?.also { sensor ->
-                sensorManager.registerListener(this, sensor, SensorManager.SENSOR_DELAY_UI)
-            }
-        }
-    }
-
-    override fun onPause() {
-        super.onPause()
-        sensorManager.unregisterListener(this)
-        // Save total walking time when pausing
-        if (isWalking.value) {
-            val currentTime = System.currentTimeMillis()
-            totalWalkingTime.value += currentTime - walkingStartTime.value
-            sharedPreferences.edit { putLong("totalWalkingTime", totalWalkingTime.value) }
-        }
-    }
-
-    override fun onSensorChanged(event: SensorEvent?) {
-        event?.let {
-            if (it.sensor.type == Sensor.TYPE_STEP_COUNTER) {
-                if (initialStepCount == -1f) {
-                    initialStepCount = it.values[0]
-                    sharedPreferences.edit { putFloat("initialStepCount", initialStepCount) }
-                }
-                stepCount.value = it.values[0]
-                saveStepData(stepCount.value - initialStepCount)
-
-                // Track walking duration
-                if (!isWalking.value) {
-                    isWalking.value = true
-                    walkingStartTime.value = System.currentTimeMillis()
-                }
-            }
-        }
-    }
-
-    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
-        // No implementation needed
     }
 
     private fun checkAndResetDailySteps() {
@@ -215,7 +226,6 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         val lastResetDay = SimpleDateFormat("yyyyMMdd", Locale.US).format(lastResetTime.value)
 
         if (lastResetDay != currentDay) {
-            // Reset daily steps
             initialStepCount = stepCount.value
             totalWalkingTime.value = 0L
             sharedPreferences.edit {
@@ -223,7 +233,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 putLong("lastResetTime", calendar.timeInMillis)
                 putLong("totalWalkingTime", 0L)
             }
-            saveStepData(0f) // Reset daily steps
+            saveStepData(0f)
         }
     }
 
@@ -412,7 +422,6 @@ fun DashboardTab(
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onSurface
                 )
-                // Modern Progress Indicator with Theme Adaptation
                 CircularProgressIndicator(
                     progress = { minOf(stepCount.toFloat() / stepGoal, 1f) },
                     modifier = Modifier.size(140.dp),
@@ -555,7 +564,6 @@ fun SettingsTab(
                     val newGoal = goalInput.replace(".", "").toIntOrNull()
                     if (newGoal != null && newGoal in 1000..50000) {
                         onStepGoalChange(newGoal)
-                        errorMessage = ""
                         goalInput = numberFormat.format(newGoal) // Update with formatted value
                     } else {
                         errorMessage = "Step goal must be between 1.000 and 50.000"
@@ -574,12 +582,7 @@ fun SettingsTab(
             onValueChange = { weightValue = it },
             valueRange = 30f..150f,
             onValueChangeFinished = {
-                if (weightValue in 30f..150f) {
-                    onWeightChange(weightValue)
-                    errorMessage = ""
-                } else {
-                    errorMessage = "Weight must be between 30 and 150 kg"
-                }
+                onWeightChange(weightValue)
             },
             modifier = Modifier.fillMaxWidth()
         )
@@ -591,12 +594,7 @@ fun SettingsTab(
             onValueChange = { heightValue = it },
             valueRange = 100f..250f,
             onValueChangeFinished = {
-                if (heightValue in 100f..250f) {
-                    onHeightChange(heightValue)
-                    errorMessage = ""
-                } else {
-                    errorMessage = "Height must be between 100 and 250 cm"
-                }
+                onHeightChange(heightValue)
             },
             modifier = Modifier.fillMaxWidth()
         )
